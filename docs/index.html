@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GovAlign Annotator · AI Safety Prompt Annotation</title>
+<meta name="description" content="Annotation platform for AI model safety prompts across multiple jurisdictions." />
+<link rel="stylesheet" href="css/style.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='80' font-size='80'%3E%E2%9A%96%3C/text%3E%3C/svg%3E" />
+</head>
+<body>
+
+<div id="app-header"></div>
+
+<section class="page-hero">
+  <h1>GovAlign Annotator</h1>
+  <p>Annotate AI model safety prompts across legal jurisdictions. Verify law citations, judge field alignment, and assess risk difficulty for researchers building safer AI.</p>
+</section>
+
+<main class="page-narrow">
+
+  <!-- Sign-in card (or welcome banner if already logged in) -->
+  <div id="auth-area" class="login-card">
+    <h2>Sign in to begin</h2>
+    <p class="subtitle">Enter your annotator ID. New IDs are registered automatically.</p>
+
+    <form id="login-form" autocomplete="off">
+      <div class="form-group">
+        <label class="form-label" for="annotator-id">Annotator ID</label>
+        <input
+          class="form-input"
+          type="text"
+          id="annotator-id"
+          name="annotator_id"
+          placeholder="e.g. PKT01, YXA02, or ADMIN"
+          maxlength="12"
+          required
+          style="text-transform: uppercase; font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;"
+        />
+        <div class="form-hint">
+          No password needed. Your ID is stored locally in your browser.
+          Use <code>ADMIN</code> for the admin dashboard.
+        </div>
+      </div>
+      <button class="btn btn-primary btn-block" type="submit" id="btn-signin">Sign In →</button>
+      <div id="login-error" class="text-warning mt-1" style="font-size: 0.85rem;"></div>
+    </form>
+  </div>
+
+  <!-- Country picker (only shown after sign-in) -->
+  <section class="section" id="country-section" style="display: none;">
+    <div class="section-header">
+      <h2 class="section-title">Choose a Jurisdiction</h2>
+    </div>
+    <div id="country-grid"></div>
+  </section>
+
+  <!-- Features (only when signed out) -->
+  <section class="section" id="features-section">
+    <div class="section-header">
+      <h2 class="section-title">How Annotation Works</h2>
+    </div>
+    <div class="feature-grid">
+      <div class="feature card">
+        <div class="feature-icon">📜</div>
+        <div class="feature-title">Verify Law Citations</div>
+        <div class="feature-desc">Spot hallucinated or misrepresented law articles by cross-referencing original statutes.</div>
+      </div>
+      <div class="feature card">
+        <div class="feature-icon">🔍</div>
+        <div class="feature-title">Check Field Alignment</div>
+        <div class="feature-desc">Judge whether prompt, expected behavior, and violation type are internally consistent.</div>
+      </div>
+      <div class="feature card">
+        <div class="feature-icon">🧠</div>
+        <div class="feature-title">Rate Difficulty</div>
+        <div class="feature-desc">Estimate how hard it would be for an AI to recognize the legal risk and refuse safely.</div>
+      </div>
+      <div class="feature card">
+        <div class="feature-icon">🎯</div>
+        <div class="feature-title">Classify Risk Type</div>
+        <div class="feature-desc">Distinguish explicit violations from hidden ones that require legal domain knowledge to detect.</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="text-center text-mute mt-3" style="font-size: 0.85rem;">
+    <p>
+      GovAlign Annotator is a research tool for building safer AI models.
+      All annotations are saved locally and synced to a Google Sheet backend when configured.
+    </p>
+  </div>
+</main>
+
+<div id="app-footer"></div>
+
+<!-- ── Scripts ─────────────────────────────────────────────────────────── -->
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="js/data.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+
+<script>
+(function() {
+  APP.init();
+
+  var authArea      = document.getElementById('auth-area');
+  var countrySec    = document.getElementById('country-section');
+  var featuresSec   = document.getElementById('features-section');
+  var gridEl        = document.getElementById('country-grid');
+  var idInput       = document.getElementById('annotator-id');
+  var loginForm     = document.getElementById('login-form');
+  var loginError    = document.getElementById('login-error');
+  var btnSignin     = document.getElementById('btn-signin');
+
+  // If already signed in, show welcome + country picker
+  if (STORAGE.isLoggedIn()) {
+    var aid = STORAGE.getAnnotatorId();
+    var isAdmin = STORAGE.isAdmin();
+    authArea.innerHTML =
+      '<div class="welcome-banner">' +
+        '<h3>Welcome back, ' + UI.escapeHTML(aid) + '.</h3>' +
+        '<p>' + (isAdmin
+          ? 'You have administrator access. Head to the <a href="admin.html" style="color: var(--sidebar); font-weight: 700;">admin dashboard</a> to review progress.'
+          : 'Pick a jurisdiction below to start annotating, or jump straight to your assigned batches.') + '</p>' +
+      '</div>' +
+      '<div class="flex gap-2 mt-2">' +
+        (isAdmin
+          ? '<a class="btn btn-primary btn-block" href="admin.html">Open Admin Dashboard →</a>'
+          : '<a class="btn btn-primary btn-block" href="annotate.html">Start Annotating →</a>') +
+        '<a class="btn btn-secondary btn-block" href="dashboard.html">My Progress</a>' +
+        '<button class="btn btn-secondary" id="btn-logout-inline" type="button">Logout</button>' +
+      '</div>';
+    var lo = document.getElementById('btn-logout-inline');
+    if (lo) lo.addEventListener('click', function() {
+      STORAGE.logout();
+      window.location.reload();
+    });
+
+    countrySec.style.display = '';
+    APP.renderCountryGrid(gridEl);
+    featuresSec.style.display = 'none';
+
+    // Pre-select ID
+    idInput.value = aid;
+  } else {
+    // Pre-fill from URL ?annotator=PKT01
+    var pre = new URLSearchParams(window.location.search).get('annotator');
+    if (pre) idInput.value = pre.toUpperCase();
+  }
+
+  // Login submit
+  loginForm.addEventListener('submit', function(e) {
+    e.preventDefault();
+    loginError.textContent = '';
+    var id = idInput.value.trim();
+    if (!id) {
+      loginError.textContent = 'Please enter your annotator ID.';
+      return;
+    }
+    btnSignin.disabled = true;
+    btnSignin.textContent = 'Signing in…';
+
+    APP.login(id).then(function(result) {
+      if (!result.ok) {
+        loginError.textContent = 'Login failed: ' + (result.error || 'unknown error');
+        btnSignin.disabled = false;
+        btnSignin.textContent = 'Sign In →';
+        return;
+      }
+      UI.toast('Welcome, ' + result.annotator_id + '!', 'success');
+      setTimeout(function() {
+        // Go to annotate or admin, unless they want to choose a country first.
+        if (id.toUpperCase() === 'ADMIN') {
+          window.location.href = 'admin.html';
+        } else {
+          // Stay on the landing page so they can pick a jurisdiction.
+          window.location.reload();
+        }
+      }, 600);
+    });
+  });
+
+  // Submit on Enter
+  idInput.addEventListener('input', function() {
+    idInput.value = idInput.value.toUpperCase();
+  });
+  idInput.focus();
+})();
+</script>
+
+</body>
+</html>

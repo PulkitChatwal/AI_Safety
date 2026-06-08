@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>My Dashboard · GovAlign Annotator</title>
+<link rel="stylesheet" href="css/style.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='80' font-size='80'%3E%E2%9A%96%3C/text%3E%3C/svg%3E" />
+</head>
+<body>
+
+<div id="app-header"></div>
+
+<main class="page">
+
+  <div class="section-header">
+    <div>
+      <h1 style="margin-bottom: 0.25rem;">My Dashboard</h1>
+      <p class="text-mute" style="margin: 0;">Track your annotation progress and export your labels.</p>
+    </div>
+    <div class="flex gap-1">
+      <button class="btn btn-secondary" id="btn-refresh">↻ Refresh</button>
+      <button class="btn btn-accent" id="btn-export">⬇ Export My Annotations</button>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stat-grid mt-2" id="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Total Annotated</div>
+      <div class="stat-value" id="stat-total">—</div>
+      <div class="stat-sublabel">across all batches</div>
+    </div>
+    <div class="stat-card accent">
+      <div class="stat-label">Batches Touched</div>
+      <div class="stat-value" id="stat-batches">—</div>
+      <div class="stat-sublabel">unique batch IDs</div>
+    </div>
+    <div class="stat-card success">
+      <div class="stat-label">Last Saved</div>
+      <div class="stat-value" id="stat-last" style="font-size: 1.4rem;">—</div>
+      <div class="stat-sublabel" id="stat-last-sub">most recent annotation</div>
+    </div>
+  </div>
+
+  <!-- Per-batch progress -->
+  <section class="section">
+    <div class="section-header">
+      <h2 class="section-title">Progress by Batch</h2>
+    </div>
+    <div id="batch-progress-list"></div>
+  </section>
+
+  <!-- Recent annotations table -->
+  <section class="section">
+    <div class="section-header">
+      <h2 class="section-title">My Recent Annotations</h2>
+      <span class="text-mute" id="table-count" style="font-size: 0.85rem;">— rows</span>
+    </div>
+    <div class="data-table-wrap">
+      <table class="data-table" id="annotations-table">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Batch</th>
+            <th>Prompt ID</th>
+            <th>Jurisdiction</th>
+            <th>Q1 Law</th>
+            <th>Q2 Alignment</th>
+            <th>Q2 Comment</th>
+            <th>Q3 Difficulty</th>
+            <th>Q4 Risk</th>
+          </tr>
+        </thead>
+        <tbody id="annotations-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<div id="app-footer"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="js/data.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+
+<script>
+(function() {
+  'use strict';
+
+  APP.init('dashboard');
+  if (!APP.requireLogin()) return;
+
+  var aid = STORAGE.getAnnotatorId();
+  var annotations = [];
+  var batchSummaries = [];   // { batch_id, total, completed, pct, country }
+
+  var elTotal    = document.getElementById('stat-total');
+  var elBatches  = document.getElementById('stat-batches');
+  var elLast     = document.getElementById('stat-last');
+  var elLastSub  = document.getElementById('stat-last-sub');
+  var elBatchList = document.getElementById('batch-progress-list');
+  var elTbody    = document.getElementById('annotations-tbody');
+  var elCount    = document.getElementById('table-count');
+
+  function load() {
+    // Always start with local annotations (works in demo mode).
+    var local = STORAGE.getLocalAnnotations(aid);
+    annotations = local.slice().sort(function(a, b) {
+      return (b.saved_at || 0) - (a.saved_at || 0);
+    });
+
+    // Try to enrich from backend
+    STORAGE.getAllAnnotations(aid).then(function(result) {
+      if (result.ok && result.annotations && result.annotations.length) {
+        // Merge: keep local + add any that are in backend but not in local.
+        var localKeys = {};
+        annotations.forEach(function(a) {
+          localKeys[(a.batch_id || '') + '|' + (a.prompt_id || '')] = true;
+        });
+        result.annotations.forEach(function(a) {
+          var key = (a.batch_id || '') + '|' + (a.prompt_id || '');
+          if (!localKeys[key]) annotations.push(a);
+        });
+        annotations.sort(function(a, b) {
+          return new Date(b.saved_at || b.timestamp || 0) - new Date(a.saved_at || a.timestamp || 0);
+        });
+        render();
+      } else {
+        render();
+      }
+    });
+  }
+
+  function render() {
+    // Stats
+    elTotal.textContent = annotations.length;
+    var uniqueBatches = {};
+    annotations.forEach(function(a) { if (a.batch_id) uniqueBatches[a.batch_id] = true; });
+    elBatches.textContent = Object.keys(uniqueBatches).length;
+    if (annotations[0]) {
+      var lastTs = annotations[0].saved_at || annotations[0].timestamp;
+      elLast.textContent = UI.formatTimeAgo(typeof lastTs === 'number' ? lastTs : new Date(lastTs).getTime());
+      elLastSub.textContent = UI.formatDate(lastTs);
+    } else {
+      elLast.textContent = '—';
+      elLastSub.textContent = 'no annotations yet';
+    }
+
+    // Per-batch progress — derive from localStorage for each batch we know about.
+    Object.keys(uniqueBatches).forEach(function(bid) {
+      var completed = annotations.filter(function(a) { return a.batch_id === bid; }).length;
+      batchSummaries.push({
+        batch_id: bid,
+        completed: completed,
+        // We don't know the total without loading the CSV; show as ≥ completed.
+        total: completed,
+        country: bid.split('-')[0] || '?'
+      });
+    });
+    renderBatchList();
+    renderTable();
+  }
+
+  function renderBatchList() {
+    if (!batchSummaries.length) {
+      elBatchList.innerHTML =
+        '<div class="empty-state">' +
+          '<div class="empty-state-icon">📭</div>' +
+          '<p>No batches annotated yet. <a href="annotate.html">Start annotating →</a></p>' +
+        '</div>';
+      return;
+    }
+    var html = '<div class="data-table-wrap"><table class="data-table"><thead><tr>' +
+      '<th>Batch</th><th>Completed</th><th class="num">Status</th>' +
+      '</tr></thead><tbody>';
+    batchSummaries.forEach(function(b) {
+      html += '<tr>' +
+        '<td><strong>' + UI.escapeHTML(b.batch_id) + '</strong></td>' +
+        '<td>' + b.completed + ' instances</td>' +
+        '<td class="num"><span class="badge badge-available">Active</span></td>' +
+      '</tr>';
+    });
+    html += '</tbody></table></div>';
+    elBatchList.innerHTML = html;
+  }
+
+  function renderTable() {
+    if (!annotations.length) {
+      elTbody.innerHTML = '<tr><td colspan="9" class="text-center text-mute" style="padding: 2rem;">No annotations yet. Click "Start Annotating" to begin.</td></tr>';
+      elCount.textContent = '0 rows';
+      return;
+    }
+    var rows = annotations.slice(0, 200);  // Show the most recent 200
+    elCount.textContent = annotations.length + ' rows' + (annotations.length > 200 ? ' (showing 200)' : '');
+    elTbody.innerHTML = rows.map(function(a) {
+      var ts = a.saved_at || a.timestamp;
+      return '<tr>' +
+        '<td>' + UI.formatDate(ts) + '</td>' +
+        '<td><code>' + UI.escapeHTML(a.batch_id || '') + '</code></td>' +
+        '<td><code>' + UI.escapeHTML(a.prompt_id || '') + '</code></td>' +
+        '<td>' + UI.escapeHTML(a.jurisdiction || '') + '</td>' +
+        '<td>' + UI.escapeHTML(a.q1 || '') + '</td>' +
+        '<td>' + UI.escapeHTML(a.q2 || '') + '</td>' +
+        '<td style="max-width: 220px;">' + UI.escapeHTML((a.q2_comment || '').slice(0, 80)) + '</td>' +
+        '<td>' + UI.escapeHTML(a.q3 || '') + '</td>' +
+        '<td>' + UI.escapeHTML(a.q4 || '') + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  document.getElementById('btn-refresh').addEventListener('click', function() {
+    UI.toast('Refreshing…', 'info');
+    batchSummaries = [];
+    load();
+  });
+
+  document.getElementById('btn-export').addEventListener('click', function() {
+    if (!annotations.length) {
+      UI.toast('Nothing to export yet.', 'warning');
+      return;
+    }
+    var rows = annotations.map(function(a) {
+      return {
+        timestamp: UI.formatDate(a.saved_at || a.timestamp),
+        annotator_id: a.annotator_id,
+        batch_id: a.batch_id,
+        prompt_id: a.prompt_id,
+        jurisdiction: a.jurisdiction,
+        q1_law_verified: a.q1,
+        q2_alignment: a.q2,
+        q2_comment: a.q2_comment,
+        q3_difficulty: a.q3,
+        q4_implicit_explicit: a.q4
+      };
+    });
+    UI.downloadCSV(rows, 'govalign_' + aid + '_' + new Date().toISOString().slice(0, 10) + '.csv');
+    UI.toast('Exported ' + rows.length + ' annotations.', 'success');
+  });
+
+  load();
+})();
+</script>
+
+</body>
+</html>

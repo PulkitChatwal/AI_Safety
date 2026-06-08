@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Admin Dashboard · GovAlign Annotator</title>
+<link rel="stylesheet" href="css/style.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='80' font-size='80'%3E%E2%9A%96%3C/text%3E%3C/svg%3E" />
+</head>
+<body>
+
+<div id="app-header"></div>
+
+<main class="page">
+
+  <div class="section-header">
+    <div>
+      <h1 style="margin-bottom: 0.25rem;">Admin Dashboard</h1>
+      <p class="text-mute" style="margin: 0;">Annotator progress, batch assignments, and inter-annotator agreement.</p>
+    </div>
+    <div class="flex gap-1">
+      <button class="btn btn-secondary" id="btn-refresh">↻ Refresh</button>
+      <button class="btn btn-accent" id="btn-export">⬇ Export All Annotations</button>
+      <button class="btn btn-primary" id="btn-assign">+ Assign Batch</button>
+    </div>
+  </div>
+
+  <!-- Stats overview -->
+  <div class="stat-grid mt-2" id="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Total Annotators</div>
+      <div class="stat-value" id="stat-annotators">—</div>
+      <div class="stat-sublabel">registered IDs</div>
+    </div>
+    <div class="stat-card accent">
+      <div class="stat-label">Total Annotations</div>
+      <div class="stat-value" id="stat-total">—</div>
+      <div class="stat-sublabel">across all annotators</div>
+    </div>
+    <div class="stat-card success">
+      <div class="stat-label">Avg per Annotator</div>
+      <div class="stat-value" id="stat-avg">—</div>
+      <div class="stat-sublabel">mean annotations</div>
+    </div>
+  </div>
+
+  <!-- Annotator table -->
+  <section class="section">
+    <div class="section-header">
+      <h2 class="section-title">Annotators</h2>
+    </div>
+    <div class="data-table-wrap">
+      <table class="data-table" id="annotators-table">
+        <thead>
+          <tr>
+            <th>Annotator</th>
+            <th class="num">Total</th>
+            <th>Batches</th>
+            <th>Last Active</th>
+            <th class="num">Status</th>
+          </tr>
+        </thead>
+        <tbody id="annotators-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Country breakdown -->
+  <section class="section">
+    <div class="section-header">
+      <h2 class="section-title">Per-Country Breakdown</h2>
+    </div>
+    <div class="stat-grid" id="country-grid"></div>
+  </section>
+
+  <!-- Inter-annotator agreement -->
+  <section class="section">
+    <div class="section-header">
+      <h2 class="section-title">Inter-Annotator Agreement</h2>
+      <span class="text-mute" style="font-size: 0.85rem;">(across instances annotated by 2+ people)</span>
+    </div>
+    <div class="data-table-wrap">
+      <table class="data-table" id="agreement-table">
+        <thead>
+          <tr>
+            <th>Question</th>
+            <th class="num">Overlap Instances</th>
+            <th class="num">Agreement Rate</th>
+            <th>Distribution</th>
+          </tr>
+        </thead>
+        <tbody id="agreement-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- All annotations table (last 100) -->
+  <section class="section">
+    <div class="section-header">
+      <h2 class="section-title">Recent Annotations (last 100)</h2>
+    </div>
+    <div class="data-table-wrap">
+      <table class="data-table" id="all-annotations-table">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Annotator</th>
+            <th>Batch</th>
+            <th>Prompt ID</th>
+            <th>Jurisdiction</th>
+            <th>Q1</th>
+            <th>Q2</th>
+            <th>Q3</th>
+            <th>Q4</th>
+          </tr>
+        </thead>
+        <tbody id="all-annotations-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<div id="app-footer"></div>
+
+<!-- Assign batch modal (hidden by default) -->
+<div id="modal-assign" class="modal-backdrop" style="display: none;">
+  <div class="modal">
+    <h3>Assign Batch to Annotator</h3>
+    <p class="text-mute" style="font-size: 0.9rem;">Pre-assign a batch so the annotator sees it in their sidebar.</p>
+    <form id="assign-form">
+      <div class="form-group">
+        <label class="form-label" for="assign-annotator">Annotator ID</label>
+        <input class="form-input" type="text" id="assign-annotator" required maxlength="12" style="text-transform: uppercase; font-family: 'SF Mono', monospace;">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="assign-batch">Batch ID</label>
+        <input class="form-input" type="text" id="assign-batch" required placeholder="e.g. IND-B01" style="font-family: 'SF Mono', monospace;">
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-assign">Cancel</button>
+        <button type="submit" class="btn btn-primary">Assign</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="js/data.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+
+<script>
+(function() {
+  'use strict';
+
+  APP.init('admin');
+  if (!APP.requireAdmin()) return;
+
+  var allAnnotations = [];
+  var annotators = {};   // aid → { total, batches: {bid: count}, last_active }
+
+  var elAnnotators    = document.getElementById('stat-annotators');
+  var elTotal         = document.getElementById('stat-total');
+  var elAvg           = document.getElementById('stat-avg');
+  var elAnnoTbody     = document.getElementById('annotators-tbody');
+  var elCountryGrid   = document.getElementById('country-grid');
+  var elAgreementTbody= document.getElementById('agreement-tbody');
+  var elAllAnnoTbody  = document.getElementById('all-annotations-tbody');
+
+  function load() {
+    STORAGE.getAllAnnotations().then(function(result) {
+      var anns = (result.ok && result.annotations) ? result.annotations : [];
+      allAnnotations = anns;
+      // In demo mode this only returns the local annotator's data; merge with all local.
+      if (typeof DEMO_MODE !== 'undefined' && DEMO_MODE) {
+        var localAll = STORAGE.getLocalAnnotations();
+        Object.keys(localAll).forEach(function(aid) {
+          localAll[aid].forEach(function(a) {
+            if (!anns.some(function(x) { return x.annotator_id === a.annotator_id && x.batch_id === a.batch_id && x.prompt_id === a.prompt_id; })) {
+              anns.push(a);
+            }
+          });
+        });
+        allAnnotations = anns;
+      }
+      buildAnnotatorMap();
+      renderStats();
+      renderAnnotatorTable();
+      renderCountryGrid();
+      renderAgreementTable();
+      renderAllAnnotationsTable();
+    });
+  }
+
+  function buildAnnotatorMap() {
+    annotators = {};
+    allAnnotations.forEach(function(a) {
+      var aid = a.annotator_id;
+      if (!aid) return;
+      if (!annotators[aid]) {
+        annotators[aid] = { annotator_id: aid, total: 0, batches: {}, last_active: 0, jurisdictions: {} };
+      }
+      var rec = annotators[aid];
+      rec.total++;
+      if (a.batch_id) rec.batches[a.batch_id] = (rec.batches[a.batch_id] || 0) + 1;
+      if (a.jurisdiction) {
+        var j = String(a.jurisdiction).split('(')[0].trim();
+        rec.jurisdictions[j] = (rec.jurisdictions[j] || 0) + 1;
+      }
+      var ts = a.saved_at || a.timestamp;
+      if (ts) {
+        var ms = typeof ts === 'number' ? ts : new Date(ts).getTime();
+        if (!isNaN(ms) && ms > rec.last_active) rec.last_active = ms;
+      }
+    });
+  }
+
+  function renderStats() {
+    var ids = Object.keys(annotators);
+    elAnnotators.textContent = ids.length;
+    elTotal.textContent = allAnnotations.length;
+    elAvg.textContent = ids.length ? Math.round(allAnnotations.length / ids.length) : 0;
+  }
+
+  function renderAnnotatorTable() {
+    var rows = Object.values(annotators).sort(function(a, b) { return b.total - a.total; });
+    if (!rows.length) {
+      elAnnoTbody.innerHTML = '<tr><td colspan="5" class="text-center text-mute" style="padding: 2rem;">No annotators yet.</td></tr>';
+      return;
+    }
+    elAnnoTbody.innerHTML = rows.map(function(a) {
+      var batchList = Object.keys(a.batches).slice(0, 5).map(function(b) {
+        return '<code style="font-size: 0.8rem;">' + UI.escapeHTML(b) + '</code> (' + a.batches[b] + ')';
+      }).join(', ');
+      if (Object.keys(a.batches).length > 5) {
+        batchList += ' <span class="text-mute">+' + (Object.keys(a.batches).length - 5) + ' more</span>';
+      }
+      var lastActive = a.last_active ? UI.formatTimeAgo(a.last_active) : '—';
+      return '<tr>' +
+        '<td><strong>' + UI.escapeHTML(a.annotator_id) + '</strong></td>' +
+        '<td class="num">' + a.total + '</td>' +
+        '<td>' + (batchList || '<span class="text-mute">—</span>') + '</td>' +
+        '<td>' + lastActive + '</td>' +
+        '<td class="num"><span class="badge badge-available">Active</span></td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  function renderCountryGrid() {
+    var countries = {};
+    allAnnotations.forEach(function(a) {
+      var j = (a.jurisdiction || '').split('(')[0].trim() || 'Unknown';
+      countries[j] = (countries[j] || 0) + 1;
+    });
+    var keys = Object.keys(countries);
+    if (!keys.length) {
+      elCountryGrid.innerHTML = '<div class="empty-state text-mute">No data yet.</div>';
+      return;
+    }
+    elCountryGrid.innerHTML = keys.map(function(j) {
+      return '<div class="stat-card accent">' +
+        '<div class="stat-label">' + UI.escapeHTML(j) + '</div>' +
+        '<div class="stat-value">' + countries[j] + '</div>' +
+        '<div class="stat-sublabel">annotations</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  function renderAgreementTable() {
+    // Group by prompt_id
+    var byPrompt = {};
+    allAnnotations.forEach(function(a) {
+      if (!a.prompt_id) return;
+      if (!byPrompt[a.prompt_id]) byPrompt[a.prompt_id] = [];
+      byPrompt[a.prompt_id].push(a);
+    });
+    var overlap = Object.keys(byPrompt).filter(function(pid) { return byPrompt[pid].length >= 2; });
+
+    if (!overlap.length) {
+      elAgreementTbody.innerHTML = '<tr><td colspan="4" class="text-center text-mute" style="padding: 2rem;">No instances have been annotated by 2+ people yet.</td></tr>';
+      return;
+    }
+
+    ['q1', 'q2', 'q3', 'q4'].forEach(function(field) {
+      var totalChecked = 0;
+      var agreed = 0;
+      var distribution = {};
+      overlap.forEach(function(pid) {
+        var labels = byPrompt[pid].map(function(a) { return a[field]; }).filter(function(v) { return v != null && v !== ''; });
+        if (labels.length < 2) return;
+        totalChecked++;
+        // Mode
+        var counts = {};
+        labels.forEach(function(v) { counts[v] = (counts[v] || 0) + 1; });
+        var max = 0;
+        Object.keys(counts).forEach(function(v) { if (counts[v] > max) max = counts[v]; });
+        if (max / labels.length >= 0.5) agreed++;
+        // Track distribution
+        Object.keys(counts).forEach(function(v) {
+          distribution[v] = (distribution[v] || 0) + counts[v];
+        });
+      });
+      var rate = totalChecked > 0 ? Math.round((agreed / totalChecked) * 100) : 0;
+      var distStr = Object.keys(distribution).map(function(v) {
+        return '<code style="font-size: 0.78rem;">' + UI.escapeHTML(v) + '</code> ×' + distribution[v];
+      }).join(', ');
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td><strong>' + field.toUpperCase() + '</strong></td>' +
+        '<td class="num">' + totalChecked + '</td>' +
+        '<td class="num">' + rate + '%</td>' +
+        '<td style="font-size: 0.85rem;">' + (distStr || '—') + '</td>';
+      elAgreementTbody.appendChild(tr);
+    });
+  }
+
+  function renderAllAnnotationsTable() {
+    if (!allAnnotations.length) {
+      elAllAnnoTbody.innerHTML = '<tr><td colspan="9" class="text-center text-mute" style="padding: 2rem;">No annotations yet.</td></tr>';
+      return;
+    }
+    var sorted = allAnnotations.slice().sort(function(a, b) {
+      var ta = a.saved_at || a.timestamp || 0;
+      var tb = b.saved_at || b.timestamp || 0;
+      return new Date(tb) - new Date(ta);
+    });
+    var rows = sorted.slice(0, 100);
+    elAllAnnoTbody.innerHTML = rows.map(function(a) {
+      var ts = a.saved_at || a.timestamp;
+      return '<tr>' +
+        '<td>' + UI.formatDate(ts) + '</td>' +
+        '<td><strong>' + UI.escapeHTML(a.annotator_id || '') + '</strong></td>' +
+        '<td><code>' + UI.escapeHTML(a.batch_id || '') + '</code></td>' +
+        '<td><code>' + UI.escapeHTML(a.prompt_id || '') + '</code></td>' +
+        '<td>' + UI.escapeHTML(a.jurisdiction || '') + '</td>' +
+        '<td>' + UI.escapeHTML(a.q1 || '') + '</td>' +
+        '<td>' + UI.escapeHTML(a.q2 || '') + '</td>' +
+        '<td>' + UI.escapeHTML(a.q3 || '') + '</td>' +
+        '<td>' + UI.escapeHTML(a.q4 || '') + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  // ─── Bindings ───────────────────────────────────────────────────
+  document.getElementById('btn-refresh').addEventListener('click', function() {
+    UI.toast('Refreshing…', 'info');
+    load();
+  });
+  document.getElementById('btn-export').addEventListener('click', function() {
+    if (!allAnnotations.length) {
+      UI.toast('Nothing to export yet.', 'warning');
+      return;
+    }
+    var rows = allAnnotations.map(function(a) {
+      return {
+        timestamp: UI.formatDate(a.saved_at || a.timestamp),
+        annotator_id: a.annotator_id,
+        batch_id: a.batch_id,
+        prompt_id: a.prompt_id,
+        jurisdiction: a.jurisdiction,
+        q1_law_verified: a.q1,
+        q2_alignment: a.q2,
+        q2_comment: a.q2_comment,
+        q3_difficulty: a.q3,
+        q4_implicit_explicit: a.q4
+      };
+    });
+    UI.downloadCSV(rows, 'govalign_all_' + new Date().toISOString().slice(0, 10) + '.csv');
+    UI.toast('Exported ' + rows.length + ' annotations.', 'success');
+  });
+
+  // ─── Assign batch modal ─────────────────────────────────────────
+  var modal = document.getElementById('modal-assign');
+  document.getElementById('btn-assign').addEventListener('click', function() {
+    modal.style.display = '';
+  });
+  document.getElementById('btn-cancel-assign').addEventListener('click', function() {
+    modal.style.display = 'none';
+  });
+  document.getElementById('assign-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var aid = document.getElementById('assign-annotator').value.trim().toUpperCase();
+    var bid = document.getElementById('assign-batch').value.trim().toUpperCase();
+    if (!aid || !bid) return;
+    STORAGE.assignBatch(aid, bid).then(function(result) {
+      if (result.ok) {
+        UI.toast('Assigned ' + bid + ' → ' + aid, 'success');
+        modal.style.display = 'none';
+      } else {
+        UI.toast('Failed to assign batch: ' + (result.error || 'unknown'), 'error');
+      }
+    });
+  });
+
+  load();
+})();
+</script>
+
+</body>
+</html>

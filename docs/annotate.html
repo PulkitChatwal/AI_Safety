@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Annotate · GovAlign Annotator</title>
+<link rel="stylesheet" href="css/style.css" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='80' font-size='80'%3E%E2%9A%96%3C/text%3E%3C/svg%3E" />
+</head>
+<body>
+
+<div id="app-header"></div>
+
+<main class="annotate-layout">
+
+  <!-- ─── Left sidebar: batch list ─────────────────────────────────── -->
+  <aside class="batch-sidebar">
+    <h3>Your Batches</h3>
+    <div id="batch-list" class="batch-list"></div>
+    <div class="mt-3" id="batch-summary"></div>
+    <div class="mt-3">
+      <a class="btn btn-secondary btn-block btn-sm" href="dashboard.html">View Progress →</a>
+    </div>
+  </aside>
+
+  <!-- ─── Center: instance display ──────────────────────────────────── -->
+  <section class="instance-panel">
+    <div class="instance-nav">
+      <div class="instance-nav-info">
+        Batch <strong id="current-batch-id">—</strong> ·
+        <span id="current-batch-progress">0 / 0</span> ·
+        Assigned to <strong id="current-batch-owner">—</strong>
+      </div>
+    </div>
+    <div class="instance-progress-wrap">
+      <div class="instance-progress-bar">
+        <div class="instance-progress-fill" id="batch-progress-fill" style="width: 0%"></div>
+      </div>
+      <span class="text-mute" style="font-size: 0.85rem;" id="batch-progress-label">0%</span>
+    </div>
+
+    <div id="instance-container">
+      <div class="empty-state">
+        <div class="empty-state-icon">⏳</div>
+        Loading batches…
+      </div>
+    </div>
+
+    <div class="instance-nav mt-3" id="instance-pager" style="display: none;">
+      <button class="btn btn-secondary btn-sm" id="btn-instance-prev">← Previous</button>
+      <div class="instance-nav-info">
+        Instance <strong id="instance-position">— / —</strong>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="btn-instance-next">Next →</button>
+    </div>
+  </section>
+
+  <!-- ─── Right: annotation form ────────────────────────────────────── -->
+  <aside class="annotation-panel">
+    <h2>Annotation</h2>
+    <div id="annotation-form-slot"></div>
+  </aside>
+
+</main>
+
+<div id="app-footer"></div>
+
+<!-- ── Scripts ─────────────────────────────────────────────────────────── -->
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="js/data.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+
+<script>
+(function() {
+  'use strict';
+
+  APP.init('annotate');
+  if (!APP.requireLogin()) return;
+
+  var aid = STORAGE.getAnnotatorId();
+
+  // ─── State ──────────────────────────────────────────────────────
+  var state = {
+    countryKey: null,
+    allBatches: [],
+    myBatches: [],
+    currentBatch: null,
+    currentIndex: 0,
+    instances: [],
+    pendingSave: null,         // { q1, q2, q2_comment, q3, q4 }
+    lastSavedAt: null,
+    inMemory: {}               // { batch_id: { index: { q1, q2, ... } } } cached answers
+  };
+
+  // In-memory cache survives navigation within the page even if not yet synced.
+  function getCachedAnswer(batchId, index) {
+    return state.inMemory[batchId] && state.inMemory[batchId][index] ? state.inMemory[batchId][index] : null;
+  }
+  function setCachedAnswer(batchId, index, ans) {
+    if (!state.inMemory[batchId]) state.inMemory[batchId] = {};
+    state.inMemory[batchId][index] = ans;
+  }
+
+  // ─── DOM ─────────────────────────────────────────────────────────
+  var batchListEl       = document.getElementById('batch-list');
+  var batchSummaryEl    = document.getElementById('batch-summary');
+  var instanceContainer = document.getElementById('instance-container');
+  var formSlot          = document.getElementById('annotation-form-slot');
+  var currentBatchIdEl  = document.getElementById('current-batch-id');
+  var currentProgressEl = document.getElementById('current-batch-progress');
+  var currentOwnerEl    = document.getElementById('current-batch-owner');
+  var progressFillEl    = document.getElementById('batch-progress-fill');
+  var progressLabelEl   = document.getElementById('batch-progress-label');
+  var instancePager     = document.getElementById('instance-pager');
+  var instancePosEl     = document.getElementById('instance-position');
+  var btnInstancePrev   = document.getElementById('btn-instance-prev');
+  var btnInstanceNext   = document.getElementById('btn-instance-next');
+
+  // ─── Determine country from URL or default ──────────────────────
+  var params = new URLSearchParams(window.location.search);
+  state.countryKey = params.get('country') || 'india';
+
+  // ─── Boot: load CSV, generate batches, render ───────────────────
+  function boot() {
+    var country = DATA.getCountry(state.countryKey);
+    if (!country || !country.available) {
+      instanceContainer.innerHTML =
+        '<div class="empty-state">' +
+          '<div class="empty-state-icon">🚧</div>' +
+          '<p>This jurisdiction is not yet available.<br>Please pick a different one from the landing page.</p>' +
+          '<a class="btn btn-secondary" href="index.html">← Back to landing</a>' +
+        '</div>';
+      return;
+    }
+
+    UI.showSkeleton(batchListEl, 3);
+    DATA.loadCSV(state.countryKey).then(function(rows) {
+      state.allBatches = DATA.generateBatches(rows, state.countryKey);
+      // For now, every annotator sees ALL batches pre-assigned to them by suffix.
+      // In production, this is gated by the BatchAssignments sheet.
+      state.myBatches = DATA.getAnnotatorBatches(state.allBatches, aid, {});
+
+      // If no batches explicitly assigned, show all batches in this country
+      if (!state.myBatches.length) {
+        state.myBatches = state.allBatches;
+      }
+
+      renderBatchList();
+
+      if (!state.myBatches.length) {
+        instanceContainer.innerHTML =
+          '<div class="empty-state">' +
+            '<div class="empty-state-icon">📭</div>' +
+            '<p>No batches are available yet for this jurisdiction.</p>' +
+          '</div>';
+        return;
+      }
+
+      // Open the first batch
+      selectBatch(state.myBatches[0].batch_id);
+    }).catch(function(err) {
+      console.error(err);
+      instanceContainer.innerHTML =
+        '<div class="empty-state">' +
+          '<div class="empty-state-icon">⚠️</div>' +
+          '<p>Failed to load dataset: ' + UI.escapeHTML(String(err.message || err)) + '</p>' +
+        '</div>';
+    });
+  }
+
+  // ─── Render batch sidebar ───────────────────────────────────────
+  function renderBatchList() {
+    var html = '';
+    state.myBatches.forEach(function(b) {
+      var completed = countCompletedForBatch(b);
+      var total = b.instances.length;
+      html += UI.batchListItemHTML(b, completed, total);
+    });
+    batchListEl.innerHTML = html;
+
+    // Bind clicks
+    Array.from(batchListEl.querySelectorAll('.batch-item')).forEach(function(el) {
+      el.addEventListener('click', function(e) {
+        e.preventDefault();
+        var bid = el.getAttribute('data-batch-id');
+        if (bid) selectBatch(bid);
+      });
+    });
+
+    // Summary
+    var total = state.myBatches.reduce(function(s, b) { return s + b.instances.length; }, 0);
+    var done  = state.myBatches.reduce(function(s, b) { return s + countCompletedForBatch(b); }, 0);
+    batchSummaryEl.innerHTML = UI.progressBar(done, total, 'Total Progress');
+  }
+
+  function countCompletedForBatch(batch) {
+    var local = STORAGE.getLocalAnnotations(aid);
+    var count = 0;
+    batch.instances.forEach(function(inst) {
+      if (local.some(function(a) { return a.batch_id === batch.batch_id && a.prompt_id === inst.prompt_id; })) {
+        count++;
+      }
+    });
+    return count;
+  }
+
+  // ─── Select a batch ─────────────────────────────────────────────
+  function selectBatch(batchId) {
+    var batch = state.myBatches.find(function(b) { return b.batch_id === batchId; });
+    if (!batch) return;
+    state.currentBatch = batch;
+    state.currentIndex = 0;
+
+    // Update sidebar active state
+    Array.from(batchListEl.querySelectorAll('.batch-item')).forEach(function(el) {
+      el.classList.toggle('active', el.getAttribute('data-batch-id') === batchId);
+    });
+
+    // Update header strip
+    currentBatchIdEl.textContent = batch.batch_id;
+    currentOwnerEl.textContent  = aid;
+    updateBatchHeader();
+
+    // Render the form
+    formSlot.innerHTML = UI.annotationFormHTML();
+    bindFormEvents();
+
+    // Render the first instance
+    renderCurrentInstance();
+  }
+
+  function updateBatchHeader() {
+    if (!state.currentBatch) return;
+    var total = state.currentBatch.instances.length;
+    var done = countCompletedForBatch(state.currentBatch);
+    currentProgressEl.textContent = done + ' / ' + total;
+    var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    progressFillEl.style.width = pct + '%';
+    progressLabelEl.textContent = pct + '%';
+  }
+
+  // ─── Render the current instance ────────────────────────────────
+  function renderCurrentInstance() {
+    if (!state.currentBatch) return;
+    var inst = state.currentBatch.instances[state.currentIndex];
+    if (!inst) {
+      instanceContainer.innerHTML =
+        '<div class="empty-state">' +
+          '<div class="empty-state-icon">✓</div>' +
+          '<p>You\'ve completed every instance in this batch.</p>' +
+        '</div>';
+      instancePager.style.display = 'none';
+      return;
+    }
+    var country = DATA.getCountry(state.countryKey);
+    instanceContainer.innerHTML = UI.instanceCardHTML(inst, country);
+    instancePager.style.display = '';
+    instancePosEl.textContent = (state.currentIndex + 1) + ' / ' + state.currentBatch.instances.length;
+
+    // Pre-fill from cache
+    var cached = getCachedAnswer(state.currentBatch.batch_id, state.currentIndex);
+    if (cached) {
+      fillForm(cached);
+    } else {
+      // Try to find an existing saved annotation
+      var local = STORAGE.getLocalAnnotations(aid);
+      var existing = local.find(function(a) {
+        return a.batch_id === state.currentBatch.batch_id && a.prompt_id === inst.prompt_id;
+      });
+      if (existing) {
+        fillForm(existing);
+        setCachedAnswer(state.currentBatch.batch_id, state.currentIndex, existing);
+      } else {
+        clearForm();
+      }
+    }
+    updateAutosaveIndicator();
+  }
+
+  function fillForm(ans) {
+    ['q1', 'q2', 'q3', 'q4'].forEach(function(name) {
+      if (ans[name]) {
+        var input = formSlot.querySelector('input[name="' + name + '"][value="' + ans[name] + '"]');
+        if (input) input.checked = true;
+      }
+    });
+    var comment = formSlot.querySelector('#q2_comment');
+    if (comment) {
+      comment.value = ans.q2_comment || '';
+      updateCharCount();
+    }
+    if (ans.saved_at) {
+      state.lastSavedAt = ans.saved_at;
+    }
+  }
+
+  function clearForm() {
+    formSlot.querySelectorAll('input[type="radio"]').forEach(function(i) { i.checked = false; });
+    var comment = formSlot.querySelector('#q2_comment');
+    if (comment) {
+      comment.value = '';
+      updateCharCount();
+    }
+  }
+
+  function readForm() {
+    var ans = {
+      annotator_id: aid,
+      batch_id: state.currentBatch ? state.currentBatch.batch_id : null,
+      prompt_id: null,
+      jurisdiction: null,
+      q1: null,
+      q2: null,
+      q2_comment: '',
+      q3: null,
+      q4: null
+    };
+    var inst = state.currentBatch && state.currentBatch.instances[state.currentIndex];
+    if (inst) {
+      ans.prompt_id = inst.prompt_id;
+      ans.jurisdiction = inst.jurisdiction;
+    }
+    formSlot.querySelectorAll('input[type="radio"]:checked').forEach(function(i) {
+      ans[i.name] = i.value;
+    });
+    var c = formSlot.querySelector('#q2_comment');
+    if (c) ans.q2_comment = c.value.slice(0, 300);
+    return ans;
+  }
+
+  function isFormComplete(ans) {
+    return ans.q1 && ans.q2 && ans.q3 && ans.q4;
+  }
+
+  // ─── Form events ───────────────────────────────────────────────
+  function bindFormEvents() {
+    var btnSave = formSlot.querySelector('#btn-save');
+    var btnPrev = formSlot.querySelector('#btn-prev');
+    var comment = formSlot.querySelector('#q2_comment');
+    var indicator = formSlot.querySelector('#autosave-indicator');
+
+    if (comment) {
+      comment.addEventListener('input', updateCharCount);
+    }
+
+    if (btnSave) {
+      btnSave.addEventListener('click', function() {
+        var ans = readForm();
+        if (!isFormComplete(ans)) {
+          UI.toast('Please answer all four questions before saving.', 'warning');
+          return;
+        }
+        saveCurrent(ans, /*advance=*/true);
+      });
+    }
+    if (btnPrev) {
+      btnPrev.addEventListener('click', function() {
+        var ans = readForm();
+        if (isFormComplete(ans)) {
+          // Auto-save partial
+          saveCurrent(ans, /*advance=*/false);
+        }
+        navigateInstance(-1);
+      });
+    }
+
+    if (btnInstancePrev) {
+      btnInstancePrev.addEventListener('click', function() {
+        navigateInstance(-1);
+      });
+    }
+    if (btnInstanceNext) {
+      btnInstanceNext.addEventListener('click', function() {
+        navigateInstance(1);
+      });
+    }
+
+    // Save on Ctrl/Cmd + Enter
+    document.addEventListener('keydown', function(e) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        if (btnSave) btnSave.click();
+      }
+    });
+  }
+
+  function navigateInstance(delta) {
+    if (!state.currentBatch) return;
+    var next = state.currentIndex + delta;
+    if (next < 0) {
+      UI.toast('Already at first instance.', 'info');
+      return;
+    }
+    if (next >= state.currentBatch.instances.length) {
+      // Move to next batch if available
+      var idx = state.myBatches.findIndex(function(b) { return b.batch_id === state.currentBatch.batch_id; });
+      if (idx >= 0 && idx < state.myBatches.length - 1) {
+        selectBatch(state.myBatches[idx + 1].batch_id);
+        return;
+      }
+      UI.toast('You\'ve reached the end of the last batch.', 'success');
+      return;
+    }
+    state.currentIndex = next;
+    renderCurrentInstance();
+  }
+
+  // ─── Save flow ────────────────────────────────────────────────
+  function saveCurrent(ans, advance) {
+    var indicator = formSlot.querySelector('#autosave-indicator');
+    if (indicator) {
+      indicator.className = 'autosave-indicator saving';
+      indicator.textContent = 'Saving…';
+    }
+
+    // Step 1: ALWAYS save to localStorage first (offline-resilient).
+    STORAGE.saveLocalAnnotation(ans);
+    setCachedAnswer(state.currentBatch.batch_id, state.currentIndex, ans);
+    state.lastSavedAt = Date.now();
+
+    // Step 2: Sync to backend (background; doesn't block).
+    STORAGE.syncAnnotation(ans).then(function(result) {
+      if (result.ok) {
+        STORAGE.setLastSync();
+        if (indicator) {
+          indicator.className = 'autosave-indicator saved';
+          indicator.textContent = 'Saved · ' + UI.formatTimeAgo(Date.now());
+        }
+        UI.toast('Saved.', 'success');
+      } else {
+        if (indicator) {
+          indicator.className = 'autosave-indicator error';
+          indicator.textContent = 'Saved locally · sync pending';
+        }
+        UI.toast('Saved locally. Backend sync failed.', 'warning');
+      }
+      updateBatchHeader();
+      // Re-render sidebar to update the count
+      renderBatchList();
+    });
+
+    if (advance) {
+      navigateInstance(1);
+    } else {
+      updateAutosaveIndicator();
+    }
+  }
+
+  function updateCharCount() {
+    var c = formSlot.querySelector('#q2_comment');
+    var n = formSlot.querySelector('#q2-count');
+    if (c && n) n.textContent = String((c.value || '').length);
+  }
+
+  function updateAutosaveIndicator() {
+    var indicator = formSlot.querySelector('#autosave-indicator');
+    if (!indicator) return;
+    if (state.lastSavedAt) {
+      indicator.className = 'autosave-indicator saved';
+      indicator.textContent = 'Last saved: ' + UI.formatTimeAgo(state.lastSavedAt);
+    } else {
+      indicator.className = 'autosave-indicator';
+      indicator.textContent = 'No saves yet';
+    }
+  }
+
+  // ─── Unsaved changes warning ───────────────────────────────────
+  window.addEventListener('beforeunload', function(e) {
+    if (state.pendingSave) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+
+  // ─── Boot ─────────────────────────────────────────────────────
+  boot();
+})();
+</script>
+
+</body>
+</html>
